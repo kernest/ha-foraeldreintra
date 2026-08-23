@@ -52,6 +52,14 @@ def _html_to_text(html_fragment: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _clean_subject(raw: str) -> str:
+    """Rens fagnavn — fjern placeholder-tekster fra ForældreIntra."""
+    s = (raw or "").strip()
+    if not s or s.lower() in ("(uden angivelse af fag)",):
+        return "Generelt"
+    return s
+
+
 def _clean_child_name(name: str) -> str:
     """Fjern evt. 'item' suffix fra barnets navn i URL."""
     n = (name or "").strip()
@@ -238,10 +246,10 @@ def _parse_weekplan_page(
 
     for lesson_plan in general_plan.get("LessonPlans") or []:
         subject_obj = lesson_plan.get("Subject") or {}
-        subject = (
+        subject = _clean_subject(
             subject_obj.get("FormattedTitle")
             or subject_obj.get("Title")
-            or "Generelt"
+            or ""
         )
         content_html = lesson_plan.get("Content") or ""
         content_text = _html_to_text(content_html)
@@ -264,10 +272,10 @@ def _parse_weekplan_page(
 
         for lesson_plan in daily_plan.get("LessonPlans") or []:
             subject_obj = lesson_plan.get("Subject") or {}
-            subject = (
+            subject = _clean_subject(
                 subject_obj.get("FormattedTitle")
                 or subject_obj.get("Title")
-                or "Generelt"
+                or ""
             )
             content_html = lesson_plan.get("Content") or ""
             content_text = _html_to_text(content_html)
