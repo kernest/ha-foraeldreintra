@@ -117,6 +117,43 @@ class TestHtmlToText:
         result = _html_to_text("<p>A</p><p></p><p>B</p>")
         assert result == "A\nB"
 
+    def test_red_text_becomes_bold(self):
+        result = _html_to_text('<span style="color: red">HUSK dette</span>')
+        assert "**HUSK dette**" in result
+
+    def test_colored_span_becomes_bold(self):
+        result = _html_to_text('<span style="color: #c0392b">Vigtigt!</span>')
+        assert "**Vigtigt!**" in result
+
+    def test_rgb_color_becomes_bold(self):
+        result = _html_to_text('<span style="color: rgb(255, 0, 0)">OBS</span>')
+        assert "**OBS**" in result
+
+    def test_black_text_stays_plain(self):
+        result = _html_to_text('<span style="color: black">Normal tekst</span>')
+        assert "**" not in result
+        assert "Normal tekst" in result
+
+    def test_black_hex_stays_plain(self):
+        result = _html_to_text('<span style="color: #000000">Normal</span>')
+        assert "**" not in result
+
+    def test_strong_tag_becomes_bold(self):
+        result = _html_to_text("<p>Hej <strong>verden</strong></p>")
+        assert "**verden**" in result
+
+    def test_em_tag_becomes_italic(self):
+        result = _html_to_text("<p>Hej <em>verden</em></p>")
+        assert "_verden_" in result
+
+    def test_mixed_color_and_plain(self):
+        result = _html_to_text(
+            '<p>Normal tekst <span style="color:red">VIGTIGT</span> mere tekst</p>'
+        )
+        assert "**VIGTIGT**" in result
+        assert "Normal tekst" in result
+        assert "mere tekst" in result
+
 
 class TestParseHomeworkNotes:
     def test_empty_html_returns_empty_list(self):

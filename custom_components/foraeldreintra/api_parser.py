@@ -9,6 +9,24 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 
+_DEFAULT_COLORS = frozenset({
+    "black", "#000", "#000000", "#333", "#333333",
+    "rgb(0,0,0)", "rgb(0, 0, 0)", "rgb(51,51,51)", "rgb(51, 51, 51)",
+})
+
+
+def _has_non_default_color(tag: Any) -> bool:
+    """Returnerer True hvis elementet har en farve der ikke er standard-sort."""
+    style = (tag.get("style") or "") if hasattr(tag, "get") else ""
+    if not style:
+        return False
+    m = re.search(r"color\s*:\s*([^;\"']+)", style)
+    if not m:
+        return False
+    color = m.group(1).strip().lower().replace(" ", "")
+    return color not in {c.replace(" ", "") for c in _DEFAULT_COLORS}
+
+
 def _html_to_text(html_fragment: str) -> str:
     if not html_fragment:
         return ""
@@ -17,6 +35,16 @@ def _html_to_text(html_fragment: str) -> str:
 
     for br in soup.find_all("br"):
         br.replace_with("\n")
+
+    for tag in soup.find_all(["span", "font", "em", "i", "strong", "b"]):
+        is_bold = tag.name in ("strong", "b")
+        is_italic = tag.name in ("em", "i")
+        is_colored = _has_non_default_color(tag)
+
+        if is_bold or is_colored:
+            tag.replace_with(f"**{tag.get_text()}**")
+        elif is_italic:
+            tag.replace_with(f"_{tag.get_text()}_")
 
     text = soup.get_text("\n", strip=True)
     lines = [(line or "").replace("\xa0", " ").strip() for line in text.splitlines()]
