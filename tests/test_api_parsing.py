@@ -1,16 +1,20 @@
 import html as html_module
 import json
+from datetime import date
 
 import pytest
 
 from custom_components.foraeldreintra.api_parser import (
     _clean_child_name,
     _dk_date_to_iso,
+    _extract_all_weekplans_from_list,
     _extract_diary_id,
     _extract_latest_weekplan_from_list,
     _html_to_text,
     _parse_homework_notes,
     _parse_weekplan_page,
+    _select_best_weekplan,
+    _select_weekplans_by_offset,
 )
 
 
@@ -271,6 +275,150 @@ class TestExtractLatestWeekplanFromList:
 
     def test_returns_none_for_empty_string(self):
         assert _extract_latest_weekplan_from_list("") is None
+
+    def test_selects_current_week_over_future(self):
+        html = """
+        <ul class="sk-weekly-plans-list-container">
+          <li>
+            <a href="/item/weeklyplansandhomework/item/class/36-2026">Uge 36</a>
+          </li>
+          <li>
+            <a href="/item/weeklyplansandhomework/item/class/35-2026">Uge 35</a>
+          </li>
+          <li>
+            <a href="/item/weeklyplansandhomework/item/class/34-2026">Uge 34</a>
+          </li>
+        </ul>
+        """
+        # 2026-08-25 is a Monday in ISO week 35
+        result = _extract_latest_weekplan_from_list(html, today=date(2026, 8, 25))
+        assert result is not None
+        assert result["weekplan_id"] == "35-2026"
+
+
+class TestSelectBestWeekplan:
+    def _make_plan(self, week_id: str) -> dict[str, str]:
+        return {
+            "weekplan_id": week_id,
+            "href": f"/item/class/{week_id}",
+            "title": f"Uge {week_id}",
+        }
+
+    def test_returns_none_for_empty_list(self):
+        assert _select_best_weekplan([], today=date(2026, 8, 24)) is None
+
+    def test_returns_single_plan(self):
+        plans = [self._make_plan("35-2026")]
+        result = _select_best_weekplan(plans, today=date(2026, 8, 24))
+        assert result["weekplan_id"] == "35-2026"
+
+    def test_picks_current_week(self):
+        plans = [
+            self._make_plan("36-2026"),
+            self._make_plan("35-2026"),
+            self._make_plan("34-2026"),
+        ]
+        # 2026-08-24 is ISO week 35
+        result = _select_best_weekplan(plans, today=date(2026, 8, 24))
+        assert result["weekplan_id"] == "35-2026"
+
+    def test_prefers_past_over_future_when_equidistant(self):
+        plans = [
+            self._make_plan("36-2026"),
+            self._make_plan("34-2026"),
+        ]
+        # week 35 — both are 1 week away; past (34) has negative diff, sorted first
+        result = _select_best_weekplan(plans, today=date(2026, 8, 24))
+        assert result["weekplan_id"] == "34-2026"
+
+    def test_picks_nearest_when_no_exact_match(self):
+        plans = [
+            self._make_plan("37-2026"),
+            self._make_plan("33-2026"),
+        ]
+        # week 35 — 33 is 2 away, 37 is 2 away; past preferred
+        result = _select_best_weekplan(plans, today=date(2026, 8, 24))
+        assert result["weekplan_id"] == "33-2026"
+
+    def test_cross_year_boundary(self):
+        plans = [
+            self._make_plan("02-2027"),
+            self._make_plan("52-2026"),
+        ]
+        # 2026-12-28 is ISO week 53 of 2026
+        result = _select_best_weekplan(plans, today=date(2026, 12, 28))
+        assert result["weekplan_id"] == "52-2026"
+
+    def test_extracts_all_plans_from_list(self):
+        html = """
+        <ul class="sk-weekly-plans-list-container">
+          <li>
+            <a href="/item/weeklyplansandhomework/item/class/36-2026">Uge 36</a>
+          </li>
+          <li>
+            <a href="/item/weeklyplansandhomework/item/class/35-2026">Uge 35</a>
+          </li>
+        </ul>
+        """
+        plans = _extract_all_weekplans_from_list(html)
+        assert len(plans) == 2
+        assert plans[0]["weekplan_id"] == "36-2026"
+        assert plans[1]["weekplan_id"] == "35-2026"
+
+
+class TestSelectWeekplansByOffset:
+    def _make_plan(self, week_id: str) -> dict[str, str]:
+        return {
+            "weekplan_id": week_id,
+            "href": f"/item/class/{week_id}",
+            "title": f"Uge {week_id}",
+        }
+
+    def test_empty_list_returns_all_none(self):
+        result = _select_weekplans_by_offset([], today=date(2026, 8, 24))
+        assert result == {"previous": None, "current": None, "next": None}
+
+    def test_assigns_current_week(self):
+        plans = [self._make_plan("35-2026")]
+        # 2026-08-24 is ISO week 35
+        result = _select_weekplans_by_offset(plans, today=date(2026, 8, 24))
+        assert result["current"]["weekplan_id"] == "35-2026"
+        assert result["previous"] is None
+        assert result["next"] is None
+
+    def test_assigns_all_three_offsets(self):
+        plans = [
+            self._make_plan("34-2026"),
+            self._make_plan("35-2026"),
+            self._make_plan("36-2026"),
+        ]
+        result = _select_weekplans_by_offset(plans, today=date(2026, 8, 24))
+        assert result["previous"]["weekplan_id"] == "34-2026"
+        assert result["current"]["weekplan_id"] == "35-2026"
+        assert result["next"]["weekplan_id"] == "36-2026"
+
+    def test_ignores_distant_weeks(self):
+        plans = [
+            self._make_plan("33-2026"),
+            self._make_plan("35-2026"),
+            self._make_plan("37-2026"),
+        ]
+        result = _select_weekplans_by_offset(plans, today=date(2026, 8, 24))
+        assert result["current"]["weekplan_id"] == "35-2026"
+        assert result["previous"] is None
+        assert result["next"] is None
+
+    def test_cross_year_boundary(self):
+        plans = [
+            self._make_plan("52-2026"),
+            self._make_plan("53-2026"),
+            self._make_plan("01-2027"),
+        ]
+        # 2026-12-28 is Monday of ISO week 53
+        result = _select_weekplans_by_offset(plans, today=date(2026, 12, 28))
+        assert result["previous"]["weekplan_id"] == "52-2026"
+        assert result["current"]["weekplan_id"] == "53-2026"
+        assert result["next"]["weekplan_id"] == "01-2027"
 
 
 class TestParseWeekplanPage:

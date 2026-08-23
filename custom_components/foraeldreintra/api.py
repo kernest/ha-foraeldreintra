@@ -9,10 +9,12 @@ from bs4 import BeautifulSoup
 from .api_parser import (
     _clean_child_name,
     _dk_date_to_iso,
+    _extract_all_weekplans_from_list,
     _extract_diary_id,
     _extract_latest_weekplan_from_list,
     _parse_homework_notes,
     _parse_weekplan_page,
+    _select_weekplans_by_offset,
 )
 
 
@@ -214,80 +216,58 @@ class ForaldreIntraClient:
     async def get_weekplans_for_children(
         self,
         children: list[Child],
-    ) -> dict[str, dict[str, Any]]:
-        """Henter fuld ugeplan for hver valgt elev."""
-        result: dict[str, dict[str, Any]] = {}
+    ) -> dict[str, dict[str, dict[str, Any] | None]]:
+        """Henter forrige/aktuel/næste ugeplan for hver valgt elev."""
+        result: dict[str, dict[str, dict[str, Any] | None]] = {}
 
         for child in children:
-            plan = await self.get_weekplan_for_child(child)
-            if plan:
-                result[child.name] = plan
+            multi = await self._get_multi_weekplans_for_child(child)
+            if any(multi.values()):
+                result[child.name] = multi
 
         return result
 
-    async def get_latest_weekplans_for_children(
-        self,
-        children: list[Child],
-    ) -> list[dict[str, Any]]:
-        """Bagudkompatibel hjælpefunktion."""
-        result: list[dict[str, Any]] = []
-        plans = await self.get_weekplans_for_children(children)
-
-        for child_name, plan in plans.items():
-            result.append(
-                {
-                    "barn": child_name,
-                    "weekplan_id": plan.get("week"),
-                    "title": plan.get("title"),
-                    "url": plan.get("url"),
-                }
-            )
-
-        return result
-
-    async def get_weekplan_for_child(self, child: Child) -> dict[str, Any] | None:
-        """Henter og parser den nyeste publicerede ugeplan for ét barn."""
-        latest = await self.get_latest_weekplan_info_for_child(child)
-        if not latest:
-            return None
-
-        html_text = await self._get_text(latest["url"])
-        parsed = _parse_weekplan_page(
-            html_text=html_text,
-            weekplan_id=latest["weekplan_id"],
-            fallback_title=latest["title"],
-            url=latest["url"],
-        )
-        parsed["barn"] = child.name
-        return parsed
-
-    async def get_latest_weekplan_info_for_child(
+    async def _get_multi_weekplans_for_child(
         self,
         child: Child,
-    ) -> dict[str, Any] | None:
-        """Finder nyeste publicerede ugeplan for ét barn via /list-siden."""
+    ) -> dict[str, dict[str, Any] | None]:
+        """Henter forrige, aktuel og næste ugeplan for ét barn."""
         list_url = (
             f"{self._base_url}/parent/{child.id}/{child.name}"
             "item/weeklyplansandhomework/list"
         )
         list_html = await self._get_text(list_url)
 
-        latest = _extract_latest_weekplan_from_list(list_html)
-        if not latest:
-            return None
+        all_plans = _extract_all_weekplans_from_list(list_html)
+        selected = _select_weekplans_by_offset(all_plans)
 
-        href = latest["href"]
-        if href.startswith("/"):
-            full_url = f"{self._base_url}{href}"
-        else:
-            full_url = href
-
-        return {
-            "barn": child.name,
-            "weekplan_id": latest["weekplan_id"],
-            "title": latest["title"],
-            "url": full_url,
+        result: dict[str, dict[str, Any] | None] = {
+            "previous": None,
+            "current": None,
+            "next": None,
         }
+
+        for key, plan_info in selected.items():
+            if plan_info is None:
+                continue
+
+            href = plan_info["href"]
+            if href.startswith("/"):
+                full_url = f"{self._base_url}{href}"
+            else:
+                full_url = href
+
+            html_text = await self._get_text(full_url)
+            parsed = _parse_weekplan_page(
+                html_text=html_text,
+                weekplan_id=plan_info["weekplan_id"],
+                fallback_title=plan_info["title"],
+                url=full_url,
+            )
+            parsed["barn"] = child.name
+            result[key] = parsed
+
+        return result
 
     async def _get_home_html_and_url(self) -> tuple[str, str]:
         if self._home_html and self._home_url:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from datetime import date, timedelta
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -43,32 +44,114 @@ def _extract_diary_id(html_text: str) -> str | None:
     return None
 
 
-def _extract_latest_weekplan_from_list(html_text: str) -> dict[str, str] | None:
-    """Finder første publicerede ugeplan på /weeklyplansandhomework/list."""
+def _extract_all_weekplans_from_list(html_text: str) -> list[dict[str, str]]:
+    """Udtræk alle ugeplaner fra /weeklyplansandhomework/list."""
     soup = BeautifulSoup(html_text, "html.parser")
 
     container = soup.select_one("ul.sk-weekly-plans-list-container")
     if not container:
-        return None
+        return []
 
-    first_link = container.select_one(
+    results: list[dict[str, str]] = []
+    for link in container.select(
         "li a[href*='/weeklyplansandhomework/item/class/']"
-    )
-    if not first_link:
+    ):
+        href = (link.get("href") or "").strip()
+        title = link.get_text(" ", strip=True)
+        match = re.search(r"/item/class/(\d{1,2}-\d{4})", href)
+        if match:
+            results.append(
+                {
+                    "weekplan_id": match.group(1),
+                    "href": href,
+                    "title": title,
+                }
+            )
+    return results
+
+
+def _weekplan_id_to_tuple(weekplan_id: str) -> tuple[int, int] | None:
+    """Konverter '23-2024' til (2024, 23)."""
+    m = re.match(r"^(\d{1,2})-(\d{4})$", weekplan_id)
+    if not m:
         return None
+    return (int(m.group(2)), int(m.group(1)))
 
-    href = (first_link.get("href") or "").strip()
-    title = first_link.get_text(" ", strip=True)
 
-    match = re.search(r"/item/class/(\d{2}-\d{4})", href)
-    if not match:
+def _select_best_weekplan(
+    plans: list[dict[str, str]],
+    today: date | None = None,
+) -> dict[str, str] | None:
+    """Vælg ugeplanen der matcher den aktuelle uge, ellers den nærmeste."""
+    if not plans:
         return None
+    if len(plans) == 1:
+        return plans[0]
 
-    return {
-        "weekplan_id": match.group(1),
-        "href": href,
-        "title": title,
+    if today is None:
+        today = date.today()
+    current_year, current_week, _ = today.isocalendar()
+
+    scored: list[tuple[int, int, dict[str, str]]] = []
+    for plan in plans:
+        yw = _weekplan_id_to_tuple(plan["weekplan_id"])
+        if yw is None:
+            continue
+        year, week = yw
+        diff = (year - current_year) * 53 + (week - current_week)
+        scored.append((abs(diff), diff, plan))
+
+    if not scored:
+        return plans[0]
+
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return scored[0][2]
+
+
+def _select_weekplans_by_offset(
+    plans: list[dict[str, str]],
+    today: date | None = None,
+) -> dict[str, dict[str, str] | None]:
+    """Vælg forrige, aktuel og næste uges ugeplan."""
+    result: dict[str, dict[str, str] | None] = {
+        "previous": None,
+        "current": None,
+        "next": None,
     }
+    if not plans:
+        return result
+
+    if today is None:
+        today = date.today()
+    current_monday = today - timedelta(days=today.isoweekday() - 1)
+
+    for plan in plans:
+        yw = _weekplan_id_to_tuple(plan["weekplan_id"])
+        if yw is None:
+            continue
+        year, week = yw
+        try:
+            plan_monday = date.fromisocalendar(year, week, 1)
+        except ValueError:
+            continue
+        diff_weeks = (plan_monday - current_monday).days // 7
+        if diff_weeks == 0:
+            result["current"] = plan
+        elif diff_weeks == -1:
+            result["previous"] = plan
+        elif diff_weeks == 1:
+            result["next"] = plan
+
+    return result
+
+
+def _extract_latest_weekplan_from_list(
+    html_text: str,
+    today: date | None = None,
+) -> dict[str, str] | None:
+    """Finder den mest relevante ugeplan på /weeklyplansandhomework/list."""
+    plans = _extract_all_weekplans_from_list(html_text)
+    return _select_best_weekplan(plans, today=today)
 
 
 def _parse_weekplan_page(

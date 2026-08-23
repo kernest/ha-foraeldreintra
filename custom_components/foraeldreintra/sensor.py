@@ -194,15 +194,38 @@ def _derive_homework_from_weekplans(
     return derived
 
 
+def _get_child_plan(
+    data: dict[str, Any] | None,
+    child: str,
+    offset: str,
+) -> dict[str, Any]:
+    """Hent en bestemt ugeplan (previous/current/next) for ét barn."""
+    raw = (data or {}).get("weeklyplans", {}) or {}
+    for name, multi in raw.items():
+        if (_decode_display_value(name) or "") == child:
+            plan = (multi or {}).get(offset)
+            if plan:
+                return _decode_weekplan(plan)
+    return {}
+
+
+def _extract_current_weekplans(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Udtræk aktuelle ugeplaner fra den nye multi-uge-struktur."""
+    raw = (data or {}).get("weeklyplans", {}) or {}
+    result: dict[str, dict[str, Any]] = {}
+    for child_name, multi in raw.items():
+        current = (multi or {}).get("current")
+        if current:
+            result[_decode_display_value(child_name) or ""] = _decode_weekplan(current)
+    return result
+
+
 def _merge_homework_items(
     entry: ConfigEntry,
     data: dict[str, Any],
 ) -> list[dict[str, Any]]:
     base_items = [_decode_homework_item(item) for item in list((data or {}).get("items", []) or [])]
-    weeklyplans = {
-        _decode_display_value(child_name) or "": _decode_weekplan(plan or {})
-        for child_name, plan in ((data or {}).get("weeklyplans", {}) or {}).items()
-    }
+    weeklyplans = _extract_current_weekplans(data)
     return base_items + _derive_homework_from_weekplans(entry, weeklyplans)
 
 
@@ -286,6 +309,8 @@ async def async_setup_entry(
 
         if show_weekplan:
             entities.append(ForaeldreIntraChildWeekplanSensor(coordinator, entry, child_name))
+            entities.append(ForaeldreIntraChildWeekplanPreviousSensor(coordinator, entry, child_name))
+            entities.append(ForaeldreIntraChildWeekplanNextSensor(coordinator, entry, child_name))
 
         if show_weekplan_general_sensors:
             entities.append(ForaeldreIntraChildWeekplanGeneralSensor(coordinator, entry, child_name))
@@ -384,21 +409,29 @@ class ForaeldreIntraChildHomeworkSensor(ForaeldreIntraBaseSensor):
         return attrs
 
 
-class ForaeldreIntraChildWeekplanSensor(ForaeldreIntraBaseSensor):
+class _WeekplanOffsetSensor(ForaeldreIntraBaseSensor):
+    """Fælles base for ugeplan-sensorer med offset (previous/current/next)."""
     _attr_icon = "mdi:calendar-text"
+    _offset: str = "current"
 
-    def __init__(self, coordinator: ForaldreIntraCoordinator, entry: ConfigEntry, child_name: str) -> None:
+    def __init__(
+        self,
+        coordinator: ForaldreIntraCoordinator,
+        entry: ConfigEntry,
+        child_name: str,
+        *,
+        offset: str,
+        name_suffix: str,
+        unique_suffix: str,
+    ) -> None:
         super().__init__(coordinator, entry)
         self._child = _decode_display_value(child_name) or ""
-        self._attr_name = f"ForældreIntra ugeplan ({self._child})"
-        self._attr_unique_id = f"{entry.entry_id}_weekplan_{slugify(self._child)}"
+        self._offset = offset
+        self._attr_name = f"ForældreIntra ugeplan{name_suffix} ({self._child})"
+        self._attr_unique_id = f"{entry.entry_id}_weekplan_{unique_suffix}_{slugify(self._child)}"
 
     def _get_plan(self) -> dict[str, Any]:
-        weeklyplans = {
-            _decode_display_value(name) or "": _decode_weekplan(plan or {})
-            for name, plan in ((self.coordinator.data or {}).get("weeklyplans", {}) or {}).items()
-        }
-        return weeklyplans.get(self._child, {})
+        return _get_child_plan(self.coordinator.data, self._child, self._offset)
 
     @property
     def native_value(self) -> str:
@@ -457,6 +490,26 @@ class ForaeldreIntraChildWeekplanSensor(ForaeldreIntraBaseSensor):
         return attrs
 
 
+class ForaeldreIntraChildWeekplanSensor(_WeekplanOffsetSensor):
+    def __init__(self, coordinator: ForaldreIntraCoordinator, entry: ConfigEntry, child_name: str) -> None:
+        super().__init__(coordinator, entry, child_name, offset="current", name_suffix="", unique_suffix="current")
+        self._attr_unique_id = f"{entry.entry_id}_weekplan_{slugify(self._child)}"
+
+
+class ForaeldreIntraChildWeekplanPreviousSensor(_WeekplanOffsetSensor):
+    _attr_icon = "mdi:calendar-arrow-left"
+
+    def __init__(self, coordinator: ForaldreIntraCoordinator, entry: ConfigEntry, child_name: str) -> None:
+        super().__init__(coordinator, entry, child_name, offset="previous", name_suffix=" forrige uge", unique_suffix="previous")
+
+
+class ForaeldreIntraChildWeekplanNextSensor(_WeekplanOffsetSensor):
+    _attr_icon = "mdi:calendar-arrow-right"
+
+    def __init__(self, coordinator: ForaldreIntraCoordinator, entry: ConfigEntry, child_name: str) -> None:
+        super().__init__(coordinator, entry, child_name, offset="next", name_suffix=" næste uge", unique_suffix="next")
+
+
 class ForaeldreIntraChildWeekplanGeneralSensor(ForaeldreIntraBaseSensor):
     _attr_icon = "mdi:text-box-outline"
 
@@ -467,11 +520,7 @@ class ForaeldreIntraChildWeekplanGeneralSensor(ForaeldreIntraBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_weekplan_general_{slugify(self._child)}"
 
     def _get_raw_plan(self) -> dict[str, Any]:
-        weeklyplans = {
-            _decode_display_value(name) or "": _decode_weekplan(plan or {})
-            for name, plan in ((self.coordinator.data or {}).get("weeklyplans", {}) or {}).items()
-        }
-        return dict(weeklyplans.get(self._child, {}) or {})
+        return _get_child_plan(self.coordinator.data, self._child, "current")
 
     @property
     def native_value(self) -> str:
@@ -520,11 +569,7 @@ class ForaeldreIntraChildWeekplanFocusSensor(ForaeldreIntraBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_weekplan_focus_{slugify(self._child)}"
 
     def _get_raw_plan(self) -> dict[str, Any]:
-        weeklyplans = {
-            _decode_display_value(name) or "": _decode_weekplan(plan or {})
-            for name, plan in ((self.coordinator.data or {}).get("weeklyplans", {}) or {}).items()
-        }
-        return dict(weeklyplans.get(self._child, {}) or {})
+        return _get_child_plan(self.coordinator.data, self._child, "current")
 
     @property
     def native_value(self) -> str:
@@ -573,11 +618,7 @@ class ForaeldreIntraChildWeekplanScheduleSensor(ForaeldreIntraBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_weekplan_schedule_{slugify(self._child)}"
 
     def _get_raw_plan(self) -> dict[str, Any]:
-        weeklyplans = {
-            _decode_display_value(name) or "": _decode_weekplan(plan or {})
-            for name, plan in ((self.coordinator.data or {}).get("weeklyplans", {}) or {}).items()
-        }
-        return dict(weeklyplans.get(self._child, {}) or {})
+        return _get_child_plan(self.coordinator.data, self._child, "current")
 
     @property
     def native_value(self) -> str:
